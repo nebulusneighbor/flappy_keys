@@ -3,9 +3,12 @@ import pygame.midi
 import mido
 from mido import MidiFile, Message, MidiTrack
 import random
+import time
+from collections import deque
 
 pygame.init()
 pygame.midi.init()
+
 
 print("from mido", mido.get_input_names())
 # Prompt for user choice
@@ -24,8 +27,6 @@ print(f"Using MIDI Input: {midi_input_name}")
 # midi_input = pygame.midi.Input(input_id)
 
 game_end_time = None
-
-
 last_key = None
 name_entered = False
 # Alternatively, with mido
@@ -37,6 +38,7 @@ bird_velocity = 5  # Initial velocity
 gravity = 0.5  # Gravity effect
 flap_strength = -2.5  # The upward force when the bird flaps
 health = 100  # Initial health of the character
+note_events = deque(maxlen=10) 
 
 def prompt_for_name(screen, prompt):
     name = ""
@@ -56,7 +58,9 @@ def prompt_for_name(screen, prompt):
         pygame.display.flip()
         clock.tick(30)
 
-leaderboard = []
+leaderboard_left = []
+leaderboard_right = []
+
 try:
     with open("leaderboard.txt", "r") as f:
         leaderboard = [line.strip().split(',') for line in f]
@@ -65,17 +69,69 @@ try:
 except FileNotFoundError:
     leaderboard = []
 
-def update_leaderboard(leaderboard, name, time):
-    leaderboard.append((name, time))
-    leaderboard.sort(key=lambda x: x[1], reverse=True)  # Sort by time/score in descending order
-    return leaderboard[:5]  # Keep top 5
+def update_leaderboard(hand, name, time):
+    global leaderboard_left, leaderboard_right
+    if hand == 'left':
+        leaderboard_left.append((name, time))
+        leaderboard_left.sort(key=lambda x: x[1], reverse=True)
+        leaderboard_left = leaderboard_left[:5]
+    else:
+        leaderboard_right.append((name, time))
+        leaderboard_right.sort(key=lambda x: x[1], reverse=True)
+        leaderboard_right = leaderboard_right[:5]
 
-def display_leaderboard(screen, leaderboard):
-    start_y = 10
-    for name, time in leaderboard:
-        text_surf = font.render(f"{name}: {time:.2f}s", True, (0, 0, 0))
-        screen.blit(text_surf, (650, start_y))
-        start_y += 30  # Move down for the next entry
+
+def update_leaderboard(hand, name, score):
+    global leaderboard_left, leaderboard_right
+    if hand == 'left':
+        leaderboard_left.append((name, score))
+        leaderboard_left.sort(key=lambda x: x[1], reverse=True)
+        leaderboard_left = leaderboard_left[:5]  # Keep top 5
+    else:
+        leaderboard_right.append((name, score))
+        leaderboard_right.sort(key=lambda x: x[1], reverse=True)
+        leaderboard_right = leaderboard_right[:5]  # Keep top 5
+
+
+def display_leaderboards(screen):
+    # Display Left Hand Leaderboard
+    start_y_left = 50
+    font = pygame.font.SysFont(None, 36)
+    display_text(screen, "Left Hand Leaderboard", (50, start_y_left - 30), size=30, color=(0, 0, 255))
+    for name, score in leaderboard_left[:5]:
+        text_surf = font.render(f"{name}: {score:.2f}s", True, (0, 0, 0))
+        screen.blit(text_surf, (50, start_y_left))
+        start_y_left += 30
+
+    # Display Right Hand Leaderboard
+    start_y_right = 50
+    display_text(screen, "Right Hand Leaderboard", (400, start_y_right - 30), size=30, color=(0, 0, 255))
+    for name, score in leaderboard_right[:5]:
+        text_surf = font.render(f"{name}: {score:.2f}s", True, (0, 0, 0))
+        screen.blit(text_surf, (400, start_y_right))  # Adjust position as needed
+        start_y_right += 30
+    
+def save_leaderboards():
+    with open("leaderboard_left.txt", "w") as f_left, open("leaderboard_right.txt", "w") as f_right:
+        for name, score in leaderboard_left:
+            f_left.write(f"{name},{score}\n")
+        for name, score in leaderboard_right:
+            f_right.write(f"{name},{score}\n")
+
+def load_leaderboards():
+    global leaderboard_left, leaderboard_right
+    try:
+        with open("leaderboard_left.txt", "r") as f_left:
+            leaderboard_left = [line.strip().split(',') for line in f_left]
+            leaderboard_left = [(name, float(score)) for name, score in leaderboard_left]
+        with open("leaderboard_right.txt", "r") as f_right:
+            leaderboard_right = [line.strip().split(',') for line in f_right]
+            leaderboard_right = [(name, float(score)) for name, score in leaderboard_right]
+    except FileNotFoundError:
+        leaderboard_left = []
+        leaderboard_right = []
+
+
 
 class Obstacle:
     def __init__(self, x, width, height, gap, color=(0, 255, 0)):
@@ -172,24 +228,58 @@ def update_bird_position():
     bird_velocity += gravity
     bird_position[1] += bird_velocity
 
-def process_input(last_key):
-    global bird_velocity
-    for msg in midi_input.iter_pending():
-        if msg.type == 'note_on' and msg.velocity > 0:  # Note on
-            note = msg.note
-            if note % 12 in [0, 2]:  # All C's and D's
+def choose_hand(screen):
+    font = pygame.font.SysFont(None, 55)
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_l:
+                    return 'left'
+                elif event.key == pygame.K_r:
+                    return 'right'
+        
+        screen.fill((255, 255, 255))
+        text_surf = font.render("Choose Hand: L for Left, R for Right", True, (0, 0, 0))
+        screen.blit(text_surf, (100, 250))
+        pygame.display.flip()
+        clock.tick(30)
+
+
+def process_midi_events():
+    global bird_velocity, last_key
+
+    minimal_gap = 0.05  # Minimum gap between notes to count as separate
+    simultaneous_threshold = 0.02  # Threshold for simultaneous note presses
+
+    while True:  # Loop to process available MIDI messages
+        msg = midi_input.poll()  # Non-blocking receive
+        if msg is None:
+            break  # No more messages, break out of the loop
+
+        if msg.type == 'note_on' and msg.velocity > 0:
+            current_time = time.time()  # Get the current time
+            note_events.append((msg.note, current_time))  # Append note and timestamp
+
+            if len(note_events) < 2:
+                continue  # Need at least two events to compare
+
+            # Get the last two note events
+            _, prev_time = note_events[-2]
+            note, current_time = note_events[-1]
+
+            time_gap = current_time - prev_time
+
+            if time_gap <= simultaneous_threshold:
+                continue  # Ignore simultaneous notes
+
+            if note % 12 in [0, 2]:  # Check for C's and D's
                 new_key = 'C' if note % 12 == 0 else 'D'
-                if new_key != last_key:  # Alternate keys
+                if new_key != last_key and time_gap > minimal_gap:
                     bird_velocity = flap_strength
                     last_key = new_key
-                    print(f"MIDI Note: {note}")  # Debugging
+                    print(f"MIDI Note: {note}, Timestamp: {current_time}")
 
-    keys = pygame.key.get_pressed()
-    if ((keys[pygame.K_c] and last_key != 'C') or (keys[pygame.K_d] and last_key != 'D')) and not any(msg.type == 'note_on' for msg in midi_input.iter_pending()):
-        bird_velocity = flap_strength
-        last_key = 'C' if keys[pygame.K_c] else 'D'
 
-    return last_key
 
 
 def draw_bird(screen, position):
@@ -233,8 +323,15 @@ running = True
 
 name_entered = False
 last_key = None
+last_note_time = time.time()
+
+hand = None  # Variable to store the selected hand
+
+# At game initialization
+load_leaderboards()
 
 # Game Loop
+# Main Game Loop
 while running:
     screen.fill((255, 255, 255))
 
@@ -243,39 +340,52 @@ while running:
             running = False
 
     keys = pygame.key.get_pressed()
+
     if not game_started:
-        # Display "Press Space to Start" and wait for the SPACE key press to start the game
         if keys[pygame.K_SPACE]:
+            hand = choose_hand(screen)  # Hand selection right after the game starts
             game_started = True
-            game_start_time = pygame.time.get_ticks()  # Start the game timer
-            last_key = None  # Ensure the last key is reset at the start
+            game_start_time = pygame.time.get_ticks()
+            last_key = None
         else:
             display_text(screen, "Press Space to Start", (150, 250), size=40, color=(0, 0, 0))
     else:
-        # Game has started
         if not game_over:
-            # Game is running
-            last_key = process_input(last_key)
             update_bird_position()
             draw_bird(screen, bird_position)
-            handle_obstacles()  # You'll define this function to manage obstacles
-            handle_collision()  # You'll define this function to check for collisions
+            handle_obstacles()
+            handle_collision()
+            process_midi_events()
         else:
-            # Game is over
             display_game_over(screen)
             if keys[pygame.K_r]:
                 reset_game()
             else:
-                handle_high_score_entry()  # You'll define this function to handle high score entry and display
-                display_leaderboard(screen, leaderboard)
+                if not name_entered:
+                    name = prompt_for_name(screen, "New High Score! Enter Name: ")
+                    update_leaderboard(hand, name, game_end_time)
+                    save_leaderboards()  # Save leaderboards after updating
 
-        # Display time elapsed in the upper right corner
+                    name_entered = True
+                display_leaderboards(screen)  # Display both leaderboards
+
         if game_started and not game_over:
-            elapsed_time = (pygame.time.get_ticks() - game_start_time) / 1000  # Convert to seconds
+            elapsed_time = (pygame.time.get_ticks() - game_start_time) / 1000
             display_text(screen, f"Time: {elapsed_time:.2f}s", (650, 10), size=30, color=(0, 0, 0))
+        if game_over:
+            display_game_over(screen)
+            if not name_entered:
+                name = prompt_for_name(screen, "Enter Name: ")
+                update_leaderboard(hand, name, game_end_time)
+                save_leaderboards()  # Save leaderboards after updating
+                name_entered = True
+            display_leaderboards(screen)  # Display updated leaderboards
+            if keys[pygame.K_r]:  # Reset the game if 'R' is pressed
+                reset_game()
 
     pygame.display.flip()
     clock.tick(30)
+
 
 midi_input.close()  # Close the MIDI input
 pygame.quit()
