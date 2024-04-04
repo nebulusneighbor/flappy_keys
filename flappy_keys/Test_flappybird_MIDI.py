@@ -244,6 +244,16 @@ def choose_hand(screen):
         pygame.display.flip()
         clock.tick(30)
 
+def process_keyboard_input():
+    global bird_velocity, last_key
+    keys = pygame.key.get_pressed()
+
+    if keys[pygame.K_c] or keys[pygame.K_d]:
+        new_key = 'C' if keys[pygame.K_c] else 'D'
+        if new_key != last_key:
+            flap()
+            last_key = new_key
+
 
 def process_midi_events():
     global bird_velocity, last_key
@@ -356,6 +366,7 @@ while running:
             handle_obstacles()
             handle_collision()
             process_midi_events()
+            process_keyboard_input()
         else:
             display_game_over(screen)
             if keys[pygame.K_r]:
